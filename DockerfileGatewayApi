@@ -1,0 +1,69 @@
+ARG ARCH=arm64v8
+ARG BUILD_CONFIGURATION=Release
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.12-azurelinux3.0-${ARCH} AS base
+
+  ARG BUILD_CONFIGURATION
+  ARG BUILD_ENVIRONMENT
+
+  ARG APP_VERSION=undefined
+  ENV APP_VERSION=${APP_VERSION}
+
+  ARG BASE_IMAGE=mcr.microsoft.com/dotnet/aspnet:10.0.12-azurelinux3.0-${ARCH}
+  ENV BASE_IMAGE=${BASE_IMAGE}
+
+  EXPOSE 8080
+  ENV ASPNETCORE_URLS=http://+:8080
+  ENV ASPNETCORE_HTTP_PORTS=8080
+
+FROM base as base_environment_setup
+
+  ARG BUILD_CONFIGURATION
+  ARG BUILD_ENVIRONMENT
+
+  RUN if [ "$BUILD_ENVIRONMENT" = "Development" ]; then \
+          echo "*** BUILD_ENVIRONMENT is Development ***" \
+          && tdnf install -y ca-certificates curl tzdata  procps gawk tar sed \
+          && update-ca-trust extract \
+          && tdnf clean all \
+          && curl -sSL https://aka.ms/getvsdbgsh | /bin/sh /dev/stdin -v latest -l /vsdbg \
+      ;\
+      else \
+          echo "*** BUILD_ENVIRONMENT is not Development ***" \
+          && tdnf clean all \
+      ;\
+      fi
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0-azurelinux3.0-${ARCH} AS restore
+
+  ARG BUILD_CONFIGURATION
+  ARG BUILD_ENVIRONMENT
+
+  COPY ["./Directory.Packages.props","/"]
+  COPY ["./src/Gateway/Directory.Build.props", "./src/Gateway/Gateway.csproj", "/src/Gateway/"]
+
+  RUN dotnet restore "/src/Gateway/Gateway.csproj"
+
+FROM restore AS publish
+
+  ARG BUILD_CONFIGURATION
+  ARG BUILD_ENVIRONMENT
+
+  COPY ["/src/Gateway/","/src/Gateway/"]
+
+  RUN dotnet publish "/src/Gateway/Gateway.csproj" \
+        -c "$BUILD_CONFIGURATION" \
+        --no-restore \
+        /p:UseAppHost=false \ 
+        -o /app/publish
+
+FROM base_environment_setup AS final
+  ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
+
+  WORKDIR /app
+  COPY --from=publish /app/publish /app/.
+  RUN chown -R nonroot:nonroot /app
+
+  USER nonroot
+
+  ENTRYPOINT ["dotnet", "/app/Gateway.dll"]

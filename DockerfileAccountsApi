@@ -1,0 +1,84 @@
+ARG ARCH=arm64v8
+ARG BUILD_CONFIGURATION=Release
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.12-azurelinux3.0-${ARCH} AS base
+
+  ARG BUILD_CONFIGURATION
+  ARG BUILD_ENVIRONMENT
+
+  ARG APP_VERSION=undefined
+  ENV APP_VERSION=${APP_VERSION}
+
+  ARG BASE_IMAGE=mcr.microsoft.com/dotnet/aspnet:10.0.12-azurelinux3.0-${ARCH}
+  ENV BASE_IMAGE=${BASE_IMAGE}
+
+  EXPOSE 8080
+  ENV ASPNETCORE_URLS=http://+:8080
+  ENV ASPNETCORE_HTTP_PORTS=8080
+
+FROM base as base_environment_setup
+
+  ARG BUILD_CONFIGURATION
+  ARG BUILD_ENVIRONMENT
+
+  RUN if [ "$BUILD_ENVIRONMENT" = "Development" ]; then \
+          echo "*** BUILD_ENVIRONMENT is Development ***" \
+          && tdnf install -y ca-certificates curl tzdata  procps gawk tar sed \
+          && update-ca-trust extract \
+          && tdnf clean all \
+          && curl -sSL https://aka.ms/getvsdbgsh | /bin/sh /dev/stdin -v latest -l /vsdbg \
+      ;\
+      else \
+          echo "*** BUILD_ENVIRONMENT is not Development ***" \
+          && tdnf clean all \
+      ;\
+      fi
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0-azurelinux3.0-${ARCH} AS restore
+
+  ARG BUILD_CONFIGURATION
+  ARG BUILD_ENVIRONMENT
+
+  COPY ["./Directory.Packages.props","/"]
+  COPY ["./src/Apis/AccountsApi/Directory.Build.props", "./src/Apis/AccountsApi/AccountsApi.csproj", "/src/Apis/AccountsApi/"]
+  COPY ["./src/Core/Directory.Build.props", "/src/Core/"]
+  COPY ["./src/Core/Core.Exceptions/Core.Exceptions.csproj", "/src/Core/Core.Exceptions/"]
+  COPY ["./src/Core/Core.Handlers/Core.Handlers.csproj", "/src/Core/Core.Handlers/"]
+  COPY ["./src/Core/Core.Helpers/Core.Helpers.csproj", "/src/Core/Core.Helpers/"]
+  COPY ["./src/Core/Core.Security.Jwt/Core.Security.Jwt.csproj", "/src/Core/Core.Security.Jwt/"]
+
+
+  RUN dotnet restore "/src/Core/Core.Exceptions/Core.Exceptions.csproj"
+  RUN dotnet restore "/src/Core/Core.Helpers/Core.Helpers.csproj"
+  RUN dotnet restore "/src/Core/Core.Handlers/Core.Handlers.csproj"
+  RUN dotnet restore "/src/Core/Core.Security.Jwt/Core.Security.Jwt.csproj"
+  RUN dotnet restore "/src/Apis/AccountsApi/AccountsApi.csproj"
+
+FROM restore AS publish
+
+  ARG BUILD_CONFIGURATION
+  ARG BUILD_ENVIRONMENT
+
+  COPY ["/src/Core/Core.Exceptions/","/src/Core/Core.Exceptions/"]
+  COPY ["/src/Core/Core.Helpers/","/src/Core/Core.Helpers/"]
+  COPY ["/src/Core/Core.Handlers/","/src/Core/Core.Handlers/"]
+  COPY ["/src/Core/Core.Security.Jwt/","/src/Core/Core.Security.Jwt/"]
+  COPY ["/src/Apis/AccountsApi/","/src/Apis/AccountsApi/"]
+
+  RUN dotnet publish "/src/Apis/AccountsApi/AccountsApi.csproj" \
+        -c "$BUILD_CONFIGURATION" \
+        --no-restore \
+        /p:UseAppHost=false \ 
+        -o /app/publish
+
+FROM base_environment_setup AS final
+  #https://stackoverflow.com/questions/72483351/timezone-lookup-works-in-base-docker-aspnet-image-but-not-aspnet6-0-alpine3-15
+  ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
+
+  WORKDIR /app
+  COPY --from=publish /app/publish /app/.
+  RUN chown -R nonroot:nonroot /app
+
+  USER nonroot
+
+  ENTRYPOINT ["dotnet", "/app/AccountsApi.dll"]

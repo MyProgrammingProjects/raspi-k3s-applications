@@ -1,0 +1,264 @@
+pipeline {
+    //agent any
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  nodeSelector: 
+    kubernetes.io/hostname: tools
+  volumes:
+  - name: auth-data
+    emptyDir: {}
+  - name: app-build-volume
+    emptyDir: {}
+  - name: image-volume
+    emptyDir: {}
+  containers:
+  - name: podman-builder
+    image: quay.io/podman/stable
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      privileged: true
+    volumeMounts:
+      - name: auth-data
+        mountPath: /home/user/acr
+      - name: image-volume
+        mountPath: /image-archive
+    command:
+    - sh
+    - -c
+    - cat
+    tty: true
+
+  - name: azure-cli
+    image: mcr.microsoft.com/azure-cli:azurelinux3.0-arm64@sha256:e1ea504fb79e4348935072055898f675367b9bade81608c4b51835e232b913fe
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+    - name: auth-data
+      mountPath: /root/acr
+    command:
+    - sh
+    - -c
+    - cat
+    tty: true
+
+  - name: app-build-container
+    image: mcr.microsoft.com/dotnet/sdk:10.0-azurelinux3.0-arm64@sha256:7db078926447807991fce6040e9f11df8a8a114c6e2d912e7012dade5d283ee1
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - name: app-build-volume
+        mountPath: /app
+    command:
+    - sh
+    - -c
+    - cat
+    tty: true
+
+  - name: trivy
+    image: docker.io/aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - name: app-build-volume
+        mountPath: /app
+      - name: image-volume
+        mountPath: /image-archive
+    command:
+    - sh
+    - -c
+    - cat
+    tty: true
+
+  - name: auxiliary
+    image: alpine:3.22.4@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
+    imagePullPolicy: IfNotPresent
+    command:
+    - sh
+    - -c
+    - |
+      apk add yq git &&
+      cat
+    tty: true
+'''
+        }
+    }
+
+    options {
+        skipDefaultCheckout(true)
+    }
+
+    environment {
+        ACR_NAME = "acr_name"
+        ACR_FULLNAME = "acr_name.azurecr.io"
+        AZ_CLIENT_ID=credentials('AzureAppId')
+        AZ_CLIENT_SECRET=credentials('AzureSecret')
+        AZ_TENANT_ID=credentials('AzureTenantId')
+        AZ_SUBSCRIPTION_ID=credentials('AzureSubscriptionId')
+        CERTIFICATE_PASSWORD=credentials('CertificatePassword')
+        IMAGE_NAME = "search"
+        DOCKERFILE_PATH = "DockerfileSearchApi"
+        GITHUB_USER = credentials('github-ssh-jenkins')
+        BRANCH_NAME="develop"
+        CODE_GITHUB_REPOSITORY="MyProgrammingProjects/microservices.git"
+        INFRA_GITHUB_REPOSITORY="MyProgrammingProjects/microservice-search-k3s.git"
+        HELM_VALUES_PATH="./helm/values.yaml"
+        PROJECT_PATH="./src/Apis/SearchApi/SearchApi.csproj"
+        PROJECT_BUILD_PATH="/app" // this is the path defined in the volumes of the agent Pod containers. A change here must be reflected in the agent Pod definition.
+        IMAGE_ARCHIVE_VOLUME_PATH="/image-archive" // this is the path defined in the volumes of the agent Pod containers. A change here must be reflected in the agent Pod definition.
+        BUILD_CONFIGURATION="Release"
+        BUILD_ENVIRONMENT="Production"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source'
+                script {
+                    def scmVars = checkout scm
+                    echo "Checked out commit ${scmVars.GIT_COMMIT}"
+
+                    env.GIT_COMMIT_HASH = scmVars.GIT_COMMIT
+                    env.IMAGE_TAG = "${env.GIT_COMMIT_HASH}"
+                    env.FULL_IMAGE = "${env.ACR_FULLNAME}/${env.IMAGE_NAME}:${env.GIT_COMMIT_HASH}"
+                    env.IMAGE_ARCHIVE_NAME = "${env.IMAGE_NAME}_${env.GIT_COMMIT_HASH}.tar"
+                    env.IMAGE_ARCHIVE_PATH = "${env.IMAGE_ARCHIVE_VOLUME_PATH}/${env.IMAGE_NAME}_${env.GIT_COMMIT_HASH}.tar"
+                }
+            }
+        }
+
+        stage('Build Application') {
+            steps {
+                container('app-build-container') {
+                    script{
+                        def build_dotnet_application = load 'jenkins/vars/build_dotnet_application.groovy'
+                        build_dotnet_application.exec(env.PROJECT_PATH, env.PROJECT_BUILD_PATH, env.BUILD_CONFIGURATION)
+                    }
+            }
+        }
+        }
+
+        stage('Check Application Vulnerabilities') {
+            steps {
+                container('trivy') {
+                    script{
+                        def check_application_vulnerabilities = load 'jenkins/vars/check_application_vulnerabilities.groovy'
+                        check_application_vulnerabilities.exec(env.PROJECT_BUILD_PATH)
+                    }
+            }
+        }
+        }
+
+        stage('Build Image') {
+            steps {
+                container('podman-builder') {
+                   script
+                   {
+                     def container_build_image = load 'jenkins/vars/container_build_image.groovy'
+                     container_build_image.exec(env.DOCKERFILE_PATH, env.FULL_IMAGE, env.IMAGE_ARCHIVE_PATH, env.BUILD_CONFIGURATION, env.BUILD_ENVIRONMENT)
+                   }
+                }
+            }
+        }
+
+        stage('Check Image Vulnerabilities') {
+            steps {
+                container('trivy') {
+                    script{
+                        def check_image_vulnerabilities = load 'jenkins/vars/check_image_vulnerabilities.groovy'
+                        check_image_vulnerabilities.exec(env.IMAGE_ARCHIVE_PATH)
+                    }
+            }
+        }
+        }
+
+
+        stage('Login to ACR') {
+            steps {
+                container('azure-cli') {
+                    script{
+                        def az_acr = load 'jenkins/vars/az_acr.groovy'
+                    az_acr.login(env.AZ_CLIENT_ID, env.AZ_CLIENT_SECRET, env.AZ_TENANT_ID, env.ACR_NAME)
+                    }
+            }
+        }
+        }
+        
+        stage('Push Image') {
+            steps {
+                container('podman-builder') {
+                   script
+                   {
+                     def container_push_image = load 'jenkins/vars/container_push_image.groovy'
+                     container_push_image.exec(env.IMAGE_ARCHIVE_PATH, env.FULL_IMAGE)
+                   }
+                }
+            }
+        }
+        
+        stage('Checkout infrastructure repository') {
+             steps {
+                withCredentials([sshUserPrivateKey(credentialsId: 'github-ssh-jenkins',keyFileVariable: 'SSH_KEY')]) {
+                dir('infra-repo') {
+                   sh """
+                   export GIT_SSH_COMMAND="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no"
+                   git clone git@github.com:${env.INFRA_GITHUB_REPOSITORY} --branch ${env.BRANCH_NAME} .
+                   """
+                    }       
+                }
+            }
+        }
+        
+        stage('Adjust Image name') {
+            steps {
+                dir('infra-repo') {
+                    container('auxiliary') {
+                    sh """
+                    yq e '
+                    .app.image.tag = "${env.IMAGE_TAG}" | .app.image.repository = "${env.ACR_FULLNAME}/${env.IMAGE_NAME}"
+                    ' -i ${env.HELM_VALUES_PATH}
+                    """
+                    }
+                }
+            }
+        }
+        
+        stage('Update values.yaml in infrastructure repository') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: 'github-ssh-jenkins',keyFileVariable: 'SSH_KEY')]) {
+                dir('infra-repo') {
+                   sh """
+                   cat ${env.HELM_VALUES_PATH}
+                   export GIT_SSH_COMMAND="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no"
+
+                   # Commit & push
+                    git config user.email "${env.GITHUB_USER_USR}"
+                    git config user.name "jenkins"
+
+                    git add ${env.HELM_VALUES_PATH}
+                    git commit -m "adjusted image name to ${env.FULL_IMAGE}"
+                    git remote set-url origin git@github.com:${env.INFRA_GITHUB_REPOSITORY}
+                    git push origin HEAD:${env.BRANCH_NAME}
+
+                   """
+                    }       
+                }
+            }
+        }
+
+        stage('Cleanup') {
+            steps {
+                cleanWs()
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '✅ Container image published and GitOps repository updated successfully'
+        }
+        failure {
+            echo '❌ Pipeline failed. Check the stage logs for details.'
+        }
+    }
+}

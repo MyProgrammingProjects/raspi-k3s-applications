@@ -1,0 +1,16 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>default</LangVersion>
+    <Version>1.0.0.0</Version>
+    <Company>programming.projects@outlook.com</Company>
+    <Copyright>Copyright © $(Company) $([System.DateTime]::Now.Year)</Copyright>
+    <AssemblyVersion>$(Version)</AssemblyVersion>
+    <FileVersion>$(Version)</FileVersion>
+    <InformationalVersion>$(Version)-$([System.DateTime]::Now.Year).$([System.DateTime]::Now.DayOfYear)</InformationalVersion>
+    <Product>Users API</Product>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <NoWarn>CS0168</NoWarn>
+  </PropertyGroup>
+</Project>

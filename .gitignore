@@ -1,0 +1,10 @@
+obj
+bin
+.vs
+swagger.json
+*.tar
+.secrets
+pub
+.env
+.vscode
+certificates/**
