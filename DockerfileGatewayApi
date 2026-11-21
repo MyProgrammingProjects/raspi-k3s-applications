@@ -65,5 +65,6 @@ FROM base_environment_setup AS final
   RUN chown -R nonroot:nonroot /app
 
   USER nonroot
+  # uid=65532(nonroot) gid=65532(nonroot) groups65532(nonroot)
 
   ENTRYPOINT ["dotnet", "/app/Gateway.dll"]
